@@ -78,14 +78,14 @@ parser.add_argument(
     type=str,
     default='nt',
     choices=['refseq_rna', 'nt'],
-    help='Start new web Blast query for found ORFs.',
+    help='Database used for BLAST query (default="nt").',
 )
 parser.add_argument(
     '-bProg', '--blastProgram',   
     type=str,
     default='blastn',
     choices=['blastn', 'megablast'],
-    help='Start new web Blast query for found ORFs.',
+    help='Program used for BLAST query (default="blastn").',
 )
 parser.add_argument(
     '-bRID', '--blastRID',   
@@ -96,7 +96,7 @@ parser.add_argument(
     '-bqn', '--blastQueryNumber',   
     type=int,
     default=20,
-    help='Number of queries used for BLASTing results.')
+    help='Number of queries used for BLASTing results (default=20).')
 
 ################################################################################
 ################### FIXED VARIABLES AND HELPER CLASSES #########################
