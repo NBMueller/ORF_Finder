@@ -17,14 +17,17 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlencode
 from io import StringIO
 from datetime import datetime
+import warnings
 # External package libraries
 import numpy as np
 import matplotlib.pyplot as plt
+from Bio import BiopythonWarning
+warnings.simplefilter('ignore', BiopythonWarning) # Silence Biopython warnigns
 # from Bio.Blast import NCBIWWW
 # from Bio.Blast import NCBIXML
 from Bio import SearchIO
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "Nico Borgsmueller"
 __contact__ = "nicoborgsmueller@web.de"
 __credits__ = ["Andreas Andrusch"]
@@ -66,6 +69,12 @@ parser.add_argument(
     '-oio', '--ORFinORF',
     action='store_true',
     help='Check for all ORFs inside other ORFs.',   
+)
+parser.add_argument(
+    '-o', '--output',
+    type=str,
+    default=os.getcwd(),
+    help='Path for output directory creation (default=<CURRENT_WORKING_DIR>)',   
 )
 
 parser.add_argument(
@@ -257,7 +266,7 @@ class ORF:
                 st=self.start,
                 sp=self.stop,
                 l=self.length,
-                seq=self.seq,
+                seq=self.seq.replace('U', 'T'),
                 prot=self.AA_seq,
                 encl=self._get_outsideORF_str(),
                 embed=self._get_insideORF_str(),
@@ -321,13 +330,13 @@ class ORFFinder:
                 'OiO': 0}
         }
 
-        pretty_out('Start scanning forward sequence...', start='\n')
+        pretty_out('\tScanning forward sequence...')
         forward_orfs = self._get_orfs(fasta.forward_seq, '+')
-        pretty_out('...done', end='\n')
+        pretty_out('\tScanning forward sequence... done')
 
-        pretty_out('Start scanning reverse sequence...')
+        pretty_out('\tScanning reverse sequence...')
         reverse_orfs = self._get_orfs(fasta.reverse_seq, '-')
-        pretty_out('...done', end='\n')
+        pretty_out('\tScanning reverse sequence... done')
 
         if self.ORFinORF:
             pretty_out('Scanning for ORF\'s inside other ORF\'s...')
@@ -336,7 +345,9 @@ class ORFFinder:
                 '-': reverse_orfs
             }
             self.find_OiOs(all_orfs_sorted)
-            pretty_out('...done', end='\n')
+            pretty_out(
+                'Scanning for ORF\'s inside other ORF\'s... done', end='\n'
+            )
 
         self.all_orfs = {
             '+': dict(forward_orfs),
@@ -381,7 +392,7 @@ class ORFFinder:
 
         for i,j in orfs.items():
             pretty_out(
-                '({}{})-strand:\t{:5} ORF\'s'.format(strand, i, len(j))
+                '\t({}{})-strand:\t{:5} ORF\'s'.format(strand, i, len(j))
             )
             self.statistics[strand]['orfs'][i] = len(j)
 
@@ -454,7 +465,7 @@ class ORFFinder:
         self._write_statics_out(results_dir_path, length_list)
         self._plot_histogram(results_dir_path, length_list)
 
-        pretty_out('...done')
+        pretty_out('Writing results ...done')
 
 
     def _plot_histogram(self, dir_path, length_list):
@@ -558,9 +569,17 @@ class Web_BLAST:
 
 
     def query_orfs(self, results_dir_path, orfs_obj, rIDs=None):
-        orfs = []
+        orfs_raw = []
         for strand, strand_data in orfs_obj.all_orfs.items():
-            orfs.extend(strand_data.values())
+            orfs_raw.extend(strand_data.values())
+        # Sort ORFS by sequence length
+        orfs = sorted(orfs_raw, key=lambda orf: len(orf.seq))
+
+        # Redirect sterr to logging file
+        pretty_out('Redirecting stderr to logfile!', start='\n', end='\n')
+        stderr_logger = logging.getLogger('STDERR')
+        sl = StreamToLogger(stderr_logger, logging.ERROR)
+        # sys.stderr = sl
 
         pretty_out(
             'BLASTing {} sequences. This might take a while...' \
@@ -569,7 +588,7 @@ class Web_BLAST:
         pretty_out('\tBLAST program: {}'.format(self.program))
         pretty_out('\tBLAST DB: {}'.format(self.db))
         if len(orfs) < 1:
-            pretty_out('...done')
+            pretty_out('BLASTing {} sequences... done'.format(len(orfs)))
             return
 
         # Create logging file for query
@@ -580,11 +599,6 @@ class Web_BLAST:
             format='%(asctime)s - %(levelname)s - %(message)s',
             level=logging.DEBUG
         )
-        # Redirect sterr to logging file
-        pretty_out('Redirecting stderr to logfile!', start='\n', end='\n')
-        stderr_logger = logging.getLogger('STDERR')
-        sl = StreamToLogger(stderr_logger, logging.ERROR)
-        # sys.stderr = sl
 
         # Log query data
         logging.info('FASTA file: {}'.format(orfs_obj.fasta.file))
@@ -602,7 +616,7 @@ class Web_BLAST:
             pretty_out('\tIDs: {}'.format(','.join(query_ids.keys())))
             logging.info('RIDs: {}'.format(','.join(query_ids.keys())))
             logging.info('Posting successful')
-            pretty_out('\t...done')
+            pretty_out('\tSending queries... done')
         else:
             pretty_out('Using old query ids: {}'.format(','.join(rIDs)))
             logging.info('Using old query ids: {}'.format(rIDs))
@@ -612,7 +626,7 @@ class Web_BLAST:
         logging.info('Getting query results from web BLAST')   
         results = self._get_results(query_ids)
         logging.info('Getting successful') 
-        pretty_out('\t...done')
+        pretty_out('\tChecking for query results... done')
 
         pretty_out('\tStoring results...')
         blast_results_list = []
@@ -628,32 +642,41 @@ class Web_BLAST:
             if not success_flag and len(result) > 0:
                 success_flag = True
             orfs_obj.all_orfs[strand][start_pos].set_blast_result(BLAST_result(result))
-        pretty_out('\t...done')
+        pretty_out('\tStoring results... done')
 
         if success_flag:
             pretty_out('BLASTing successful!', start='\n', end='\n') 
         else:
             pretty_out('BLASTing failed! Probably too many queries...') 
 
-        pretty_out('...done')
+        pretty_out('BLASTing {} sequences... done'.format(len(orfs)), end='\n')
 
 
     def _send_query(self, orf_list):
         fasta_queries = [''] * self.queryNo
 
         # Split ORFs into given Query Number FASTA files
-        for orf_idx, orf in enumerate(orf_list):
-            query_no = orf_idx % self.queryNo
-            new_fasta = '>Strand:{},Start:{}\n{}\n' \
-                .format(orf.strand, orf.start, orf.seq)
-            fasta_queries[query_no] += new_fasta
-              
+        position = 0
+        while len(orf_list) > 0:
+            for query_no in range(self.queryNo):
+                try:
+                    orf = orf_list.pop(position)
+                # All ORFs added to FASTA already
+                except IndexError:
+                    break
+                new_fasta = '>Strand:{},Start:{}\n{}\n' \
+                    .format(orf.strand, orf.start, orf.seq)
+                fasta_queries[query_no] += new_fasta
+            if position == 0:
+                position = -1
+            else:
+                position = 0
         # Drop empty fasta strings
         actual_queries = [i for i in fasta_queries if i]  
-        actual_query_no = len(actual_queries)
+        act_query_no = len(actual_queries)
 
-        pretty_out('\tSplitted into queries: {}'.format(actual_query_no)) 
-        logging.info('Number of queries: {}'.format(actual_query_no)) 
+        pretty_out('\tSplitted into queries: {}'.format(act_query_no)) 
+        logging.info('Number of queries: {}'.format(act_query_no)) 
 
         query_ids = {}
         query = [
@@ -665,10 +688,16 @@ class Web_BLAST:
         ]
         # Send query for each fasta file
         for idx, query_fasta in enumerate(fasta_queries):
+            orfs_length = [
+                len(query_fasta.split('\n')[i]) \
+                    for i in range(1, len(query_fasta.split('\n')), 2)
+            ]
+            sum_orf = int(sum(orfs_length))
+
             # Loop till post successful
             while True:
                 cur_query = query + [('QUERY', query_fasta[:-1])]
-                # import pdb; pdb.set_trace()
+
                 query_params = urlencode(cur_query).encode('utf-8')
                 request = Request(
                     self.url,
@@ -687,7 +716,9 @@ class Web_BLAST:
                     resp_info = self._get_qBLAST_info(resp_text)
                     RID = re.search('RID = (.*)\n', resp_info).group(1)
                     query_ids[RID] = None
-                    pretty_out('\t{}/{} send'.format(idx+1, actual_query_no))
+                    pretty_out('\t{:2}/{:2} send\t({} ORFs; total bp\'s: {})' \
+                        .format(idx+1, act_query_no, len(orfs_length), sum_orf)
+                    )
                     time.sleep(3)
                     break
 
@@ -704,14 +735,14 @@ class Web_BLAST:
         last_id_query = {i: datetime.now() for i in query_ids}
         # RUn till there is a result for every query
         while True:
-            all_query_successfull = True 
+            waiting_queries = 0
             # Loop over single queries
             for query_RID, query_result in query_ids.items():
                 # Check if query already successful
                 if query_result:
                     continue
                 else:
-                    all_query_successfull = False
+                    waiting_queries += 1
 
                 cur_query = query + [('RID', query_RID)]
                 query_params = urlencode(cur_query).encode('utf-8')       
@@ -758,8 +789,10 @@ class Web_BLAST:
                     logging.info('\tRID: {},Status: READY'.format(query_RID))
                     query_ids[query_RID] = StringIO(resp_text)
                 # Sleep 3 secs till next check
-            pretty_out('\t' + '-'*40)
-            if all_query_successfull:
+            pretty_out('\t{dash} {left:2}/{total:2} left  {dash}' \
+                .format(dash='-'*13, left=waiting_queries, total=len(query_ids))
+            )
+            if waiting_queries == 0:
                 break
 
         return query_ids
@@ -799,7 +832,7 @@ class BLAST_result:
 def pretty_out(msg, start='', end=''):
     msg_formatted = '\n\t\t\t'.join(msg[i:i+60] for i in range(0, len(msg), 60))
     print('{s}{t}\t{m}{e}'.format(
-        t=datetime.strftime(datetime.now(), '%Y.%m.%dT%H.%M.%S'),
+        t=datetime.strftime(datetime.now(), '%Y.%m.%d %H.%M.%S'),
         m=msg_formatted,
         s=start,
         e=end,
@@ -817,14 +850,14 @@ if __name__ == '__main__':
     pretty_out('Reading file: {}'.format(args.fasta_file))
     fasta = FASTA(args.fasta_file)
     pretty_out('\tbp: {}'.format(len(fasta.forward_seq)))
-    pretty_out('...done')
+    pretty_out('Reading file... done')
 
     start_codons = args.start.strip().split(',')
     stop_codons = args.stop.strip().split(',')
 
     pretty_out('Using start codons: {}'.format(', '.join(start_codons)))
     pretty_out('Using stop codons: {}'.format(', '.join(stop_codons)))
-    pretty_out('Report ORFs with min length: {}'.format(args.length))
+    pretty_out('Report ORFs with min length: {}'.format(args.length), end='\n')
 
     pretty_out('Seaching for ORF\'s...')
     orfs = ORFFinder(
@@ -834,20 +867,20 @@ if __name__ == '__main__':
         stop_codons,
         args.ORFinORF
     )
-    pretty_out('...done')
+    pretty_out('Seaching for ORF\'s... done', end='\n')
 
     # Create directory to store results in
     timestamp = datetime.strftime(datetime.now(), '%Y.%m.%dT%H.%M.%S')
-    old_path = os.path.split(fasta.file)
     if args.blast or args.blastRID:
         results_dir_name = '{}_ORF_Finder_results_l{}_BLASTed_{}' \
             .format(timestamp, args.length, args.blastDB) 
     else:
         results_dir_name = '{}_ORF_Finder_results_l{}' \
             .format(timestamp, args.length) 
-    results_dir_path = os.path.join(old_path[0], results_dir_name)
+    results_dir_path = os.path.join(args.output, results_dir_name)
     os.mkdir(results_dir_path)
-    pretty_out('...done')
+    pretty_out('Results Directory: {}'.format(results_dir_path))
+
     # Run BLAST if argument given
     if args.blast or args.blastRID:
         webBlast = Web_BLAST(
