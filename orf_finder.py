@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """ This program takes a FASTA file, reads the sequence and searches for ORF\'s.
-    In Addition some functions are run on the found ORF\'s.
+    The found ORF\'s can be BLASTed via webBLAST or standalone BLAST.
 """
 
 import argparse
@@ -18,6 +18,9 @@ from urllib.parse import urlencode
 from io import StringIO
 from datetime import datetime
 import warnings
+import configparser
+import tempfile
+import subprocess
 # External package libraries
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,7 +30,7 @@ warnings.simplefilter('ignore', BiopythonWarning) # Silence Biopython warnigns
 # from Bio.Blast import NCBIXML
 from Bio import SearchIO
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __author__ = "Nico Borgsmueller"
 __contact__ = "nicoborgsmueller@web.de"
 __credits__ = ["Andreas Andrusch"]
@@ -36,6 +39,10 @@ __license__ = "GNU GPLv3"
 __status__ = "Development"
 __date__ = "2017.03.24"
 
+# Standalone BLAST Setup for Unix: https://www.ncbi.nlm.nih.gov/books/NBK52640/
+# BLAST output specifications: https://www.ncbi.nlm.nih.gov/books/NBK279675/
+# BLAST Command Line Applications User Manual: https://www.ncbi.nlm.nih.gov/books/NBK279690/
+
 ################################################################################
 ################################ ARGPARSER #####################################
 ################################################################################
@@ -43,9 +50,9 @@ __date__ = "2017.03.24"
 parser = argparse.ArgumentParser(description='Find orf\'s in a FASTA file.')
 
 parser.add_argument(
-    'fasta_file',
+    'input_file',
     type=str,
-    help="Path to FASTA file."
+    help="Path to Input file. can be either a FASTA file or a config file."
 )
 parser.add_argument(
     '-l', '--length',
@@ -741,8 +748,6 @@ class Web_BLAST:
                 # Check if query already successful
                 if query_result:
                     continue
-                else:
-                    waiting_queries += 1
 
                 cur_query = query + [('RID', query_RID)]
                 query_params = urlencode(cur_query).encode('utf-8')       
@@ -783,6 +788,8 @@ class Web_BLAST:
                     logging.info('\tRID: {},Status: {}'.format(query_RID, status))             
                     if status == 'READY':
                         query_ids[query_RID] = StringIO(resp_text)
+                    else:
+                        waiting_queries += 1
                 # Query successful
                 except AttributeError:
                     pretty_out('\tRID: {}\tStatus: READY'.format(query_RID))
@@ -806,23 +813,135 @@ class Web_BLAST:
         return resp_text[resp_info_start: resp_info_stop-1]
 
 
+################################################################################
+############################## BLAST RESULT ####################################
+################################################################################
+
+
 class BLAST_result:
     def __init__(self, result_obj):
         self.result = result_obj
-        if result_obj.hits:
-            self.description = result_obj[0].description
-            self.accession = result_obj[0].accession
-            self.HSPs = result_obj[0].hsps[0].evalue
+        if type(result_obj) == list:
+            for result in result_obj:
+                self.description = result.split('\t')[2]
+                self.accession = result.split('\t')[0]
+                self.HSPs = result.split('\t')[1]
         else:
-            self.description = 'no_hit'
-            self.accession = 'no_hit'
-            self.HSPs = 'no_hit'
+            if result_obj.hits:
+                self.description = result_obj[0].description
+                self.accession = result_obj[0].accession
+                self.HSPs = result_obj[0].hsps[0].evalue
+            else:
+                self.description = 'no_hit'
+                self.accession = 'no_hit'
+                self.HSPs = 'no_hit'
 
 
     def to_output(self):
         out_str = '{}\t{}\t{}' \
             .format(self.accession, self.HSPs, self.description)
         return out_str
+
+
+################################################################################
+########################### STANDALONE BLAST QUERY #############################
+################################################################################
+class Standalone_BLAST:
+    def __init__(self, program_path, db_path, queryNo, hitlist_size=1):
+        self.program_path = program_path
+        self.program = os.path.basename(program_path)
+        self.db_path = db_path           
+        self.queryNo = queryNo
+        self.hitlist_size = hitlist_size     
+
+
+    def query_orfs(self, results_dir_path, orfs_obj):
+        orfs_raw = []
+        for strand, strand_data in orfs_obj.all_orfs.items():
+            orfs_raw.extend(strand_data.values())
+
+        # Sort ORFS by sequence length
+        orfs = sorted(orfs_raw, key=lambda orf: len(orf.seq))
+        # Return if no ORFs found. Pretty unlikely and probably a bug
+        if len(orfs) < 1:
+            pretty_out('BLASTing {} sequences... done'.format(len(orfs)))
+            return
+
+        # Redirect sterr to logging file
+        pretty_out('Redirecting stderr to logfile!', start='\n', end='\n')
+        stderr_logger = logging.getLogger('STDERR')
+        sl = StreamToLogger(stderr_logger, logging.ERROR)
+       
+        pretty_out('standalone BLAST program: {}'.format(self.program))
+        pretty_out('BLAST DB: {}'.format(os.path.basename(self.db_path)))
+        pretty_out(
+            'BLASTing {} sequences. This might take a while...'.format(len(orfs))
+        )
+
+        # Create logging file for query
+        # Logging file
+        log_file = os.path.join(results_dir_path, 'standaloneBLAST.log')
+        logging.basicConfig(
+            filename=log_file,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            level=logging.DEBUG
+        )
+
+        # Log query data
+        logging.info('FASTA file: {}'.format(orfs_obj.fasta.file))
+        logging.info('Min ORF length: {}'.format(orfs_obj.min_length))
+        logging.info('Start Codons: {}'.format(','.join(orfs_obj.start_codons)))
+        logging.info('Stop Codons: {}'.format(','.join(orfs_obj.stop_codons)))     
+        logging.info(
+            'standalone BLAST path: {}' \
+                .format(os.path.dirname(self.program_path))
+        )  
+        logging.info(
+            'standalone BLAST program: {}' \
+                .format(self.program)
+        )
+        logging.info('BLAST DB path: {}'.format(os.path.dirname(self.db_path)))
+        logging.info('BLAST DB name: {}'.format(os.path.basename(self.db_path)))
+
+        query_time = []
+        for idx, orf in enumerate(orfs):
+            if query_time:
+                time_left = np.mean(query_time) * (len(orfs) - idx + 1) / 3600
+                pretty_out(
+                    '\t{:5}/{}\tEstimated time remaining: {:.2f} h' \
+                        .format(idx+1, len(orfs), time_left)
+                )
+            else:
+                pretty_out('\t{:5}/{}'.format(idx+1, len(orfs)))
+            query_start = datetime.now()
+            # Write orf in temporary fasta file
+            temp = tempfile.NamedTemporaryFile()
+            temp_fasta_str = '>Strand:{},Start:{}\n{}\n' \
+                .format(orf.strand, orf.start, orf.seq)
+            temp_fasta_bytes = temp_fasta_str.encode('utf-8')   
+            temp.write(temp_fasta_bytes)
+            temp.flush()
+            # Run standalone BLAST query as subprocess
+            single_query = subprocess.run(
+                [self.program_path,
+                '-query', temp.name,
+                '-db', self.db_path,
+                '-task', self.program,
+                '-dust', 'no',
+                '-outfmt', "6 sacc evalue stitle",
+                '-max_target_seqs', '1'],
+                stdout=subprocess.PIPE
+            )
+            temp.close()
+            # Get results
+            result = str(single_query.stdout, 'utf-8').strip().split('\n')
+            orf.set_blast_result(BLAST_result(result))
+            query_end = datetime.now()
+            query_time.append((query_end - query_start).total_seconds())
+
+
+
+
 
 
 ################################################################################
@@ -847,22 +966,122 @@ if __name__ == '__main__':
     pretty_out('ORF_finder start')
     args = parser.parse_args()
 
-    pretty_out('Reading file: {}'.format(args.fasta_file))
-    fasta = FASTA(args.fasta_file)
+    # Input file is a config file
+    input_file_type = args.input_file.split('.')[-1]
+
+    # Input is config
+    if input_file_type == 'cfg':
+        pretty_out('Reading input from config file...')
+        # Parse config
+        config = configparser.ConfigParser()
+        config.read(args.input_file) 
+        # Parse arguments
+        input_file = config['INPUT']['InputPath']
+        output_dir = config.get(
+            'OUTPUT',
+            'OutputPath',
+            fallback=os.getcwd(),
+        )
+
+        start_codons = config.get(
+            'ORF_Finder',
+            'StartCodon',
+            fallback='AUG'
+        ).strip().split(',')
+        stop_codons = config.get(
+            'ORF_Finder',
+            'StopCodons',
+            fallback='UAA,UAG,UGA'
+        ).strip().split(',')
+        min_length = config. getint(
+            'ORF_Finder',
+            'MinLength',
+            fallback=200
+        )
+        OrfInOrf = config.getboolean(
+            'ORF_Finder',
+            'ORFinORF',
+            fallback=False
+        )
+
+        oldWebBlastIDs = False # Not implemented for config yet
+        blastQueryNo = config. getint(
+            'BLAST',
+            'NumberOfQueries',
+            fallback=20
+        )
+        blastProgram = config.get(
+            'BLAST',
+            'BlastProgram',
+            fallback='blastn'
+        )
+        blastDB = config.get(
+            'BLAST',
+            'DBName',
+            fallback='nt'
+        )
+
+        stAlBlastResults = config.getboolean(
+            'BLAST',
+            'RunStandaloneBlast',
+            fallback=False
+        )
+        if stAlBlastResults:
+            stAlBlastPath = os.path.join(
+                config['BLAST']['BlastPath'],
+                'bin',
+                config['BLAST']['BlastProgram']
+            )
+            stAlDBPath = os.path.join(
+                config['BLAST']['DBPath'],
+                config['BLAST']['DBName']
+            )
+        webBlastResults = config.getboolean(
+            'BLAST',
+            'RunWebBlast',
+            fallback=False
+        )
+        if webBlastResults and stAlBlastResults:
+            pretty_out(
+                'Flags for Standalone and web BLAST set to True. \
+                Standalone version is used...'
+            )      
+    # Input is fasta
+    elif input_file_type in  ['fa', 'mpfa', 'fna', 'fsa', 'fasta']:
+        pretty_out('Reading input from command line...')
+        # Parse arguments
+        input_file = args.input_file
+        output_dir = args.output
+
+        start_codons = args.start.strip().split(',')
+        stop_codons = args.stop.strip().split(',')
+        min_length = args.length
+        OrfInOrf = args.ORFinORF
+
+        oldWebBlastIDs = args.blastRID
+        blastQueryNo = args.blastQueryNumber
+        blastProgram = args.blastProgram
+        blastDB = args.blastDB
+
+        stAlBlastResults = False # Not implemented for command line yet
+        webBlastResults = args.blast      
+    # Input is unknown
+    else:
+        raise IOError('Unknown input type. Use: .cfg or .fa/.fna/.fasta/.fsa')
+
+    pretty_out('Reading file: {}'.format(input_file))
+    fasta = FASTA(input_file)
     pretty_out('\tbp: {}'.format(len(fasta.forward_seq)))
     pretty_out('Reading file... done')
 
-    start_codons = args.start.strip().split(',')
-    stop_codons = args.stop.strip().split(',')
-
     pretty_out('Using start codons: {}'.format(', '.join(start_codons)))
     pretty_out('Using stop codons: {}'.format(', '.join(stop_codons)))
-    pretty_out('Report ORFs with min length: {}'.format(args.length), end='\n')
+    pretty_out('Report ORFs with min length: {}'.format(min_length), end='\n')
 
     pretty_out('Seaching for ORF\'s...')
     orfs = ORFFinder(
         fasta,
-        args.length,
+        min_length,
         start_codons,
         stop_codons,
         args.ORFinORF
@@ -871,32 +1090,42 @@ if __name__ == '__main__':
 
     # Create directory to store results in
     timestamp = datetime.strftime(datetime.now(), '%Y.%m.%dT%H.%M.%S')
-    if args.blast or args.blastRID:
+    if webBlastResults or oldWebBlastIDs or stAlBlastResults:
         results_dir_name = '{}_ORF_Finder_results_l{}_BLASTed_{}' \
-            .format(timestamp, args.length, args.blastDB) 
+            .format(timestamp, min_length, blastDB) 
     else:
         results_dir_name = '{}_ORF_Finder_results_l{}' \
-            .format(timestamp, args.length) 
-    results_dir_path = os.path.join(args.output, results_dir_name)
+            .format(timestamp, min_length) 
+    results_dir_path = os.path.join(output_dir, results_dir_name)
     os.mkdir(results_dir_path)
     pretty_out('Results Directory: {}'.format(results_dir_path))
 
     # Run BLAST if argument given
-    if args.blast or args.blastRID:
-        webBlast = Web_BLAST(
-            args.blastProgram,
-            args.blastDB,
-            args.blastQueryNumber
+    # Run standalone BLAST
+    if stAlBlastResults:
+        standaloneBlast = Standalone_BLAST(
+            stAlBlastPath,
+            stAlDBPath,
+            blastQueryNo
         )
-        if args.blast:
+        standaloneBlast.query_orfs(results_dir_path, orfs)
+    # Run web BLAST
+    elif webBlastResults or oldWebBlastIDs:
+        webBlast = Web_BLAST(
+            blastProgram,
+            blastDB,
+            blastQueryNo
+        )
+        if webBlastResults:
             webBlast.query_orfs(results_dir_path, orfs)
         else:
             webBlast.query_orfs(
                 results_dir_path,
                 orfs,
-                rIDs=args.blastRID.strip().split(',')
+                rIDs=oldWebBlastIDs.strip().split(',')
             )
-        orfs.write_output(results_dir_path, args.blastProgram, args.blastDB)
+        orfs.write_output(results_dir_path, blastProgram, blastDB)
+    # Don not run any BLAST
     else:
         orfs.write_output(results_dir_path, 'not used', 'not used')
 
